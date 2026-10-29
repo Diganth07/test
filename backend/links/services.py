@@ -6,7 +6,7 @@ from urllib.parse import quote, urlparse
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 from django.db import IntegrityError, transaction
-from django.db.models import Count, F, Sum
+from django.db.models import Count, F, Q, Sum
 from django.db.models.functions import Coalesce
 from .models import Link, ClickLog
 
@@ -90,15 +90,27 @@ def create_link(original_url: str, custom_slug: str = None) -> Link:
     raise RuntimeError('Could not generate an available short code')
 
 
-def get_links(page: int = 1, limit: int = 10, include_deleted: bool = False) -> dict:
+def get_links(
+    page: int = 1,
+    limit: int = 10,
+    include_deleted: bool = False,
+    search: str = ''
+) -> dict:
     """Returns paginated links along with pagination metadata."""
     if not isinstance(page, int) or isinstance(page, bool) or page < 1:
         raise ValueError('Page must be a positive integer')
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         raise ValueError('Limit must be a positive integer')
+    if not isinstance(search, str):
+        raise ValueError('Search must be a string')
 
     offset = (page - 1) * limit
     qs = Link.objects.filter(is_deleted=include_deleted).order_by('-id')
+    if search:
+        qs = qs.filter(
+            Q(short_code__icontains=search) |
+            Q(original_url__icontains=search)
+        )
     total = qs.count()
     links_page = qs[offset:offset + limit]
 
@@ -133,11 +145,11 @@ def get_link_by_short_code(short_code: str) -> Link:
 def record_click(link_id: int, referrer: str = None, ip: str = None, user_agent: str = None):
     """Logs a click and increments click and unique click counts."""
     clean_referrer = 'direct'
-    if referrer:
+    if isinstance(referrer, str) and referrer:
         try:
             parsed = urlparse(referrer)
-            clean_referrer = parsed.netloc or referrer
-        except Exception:
+            clean_referrer = (parsed.netloc or referrer)[:255]
+        except ValueError:
             clean_referrer = 'direct'
 
     ip_hash = 'unknown'
@@ -212,7 +224,7 @@ def get_global_stats() -> dict:
     )
 
     top_referrers = list(
-        ClickLog.objects.values('referrer')
+        ClickLog.objects.filter(link__is_deleted=False).values('referrer')
         .annotate(count=Count('id'))
         .order_by('-count')[:5]
     )
